@@ -4103,14 +4103,24 @@ class FallbackKernel(ExternKernelAlloc):
 
         self.op_overload = kernel
 
-        assert isinstance(
-            kernel,
-            (
-                torch._ops.OpOverload,
-                torch._ops.HigherOrderOperator,
-                torch._inductor.fx_passes.onednn_graph_fusion.OnednnGraphPartitionModule
-            ),
-        ), f"Fails to create FallbackKernel for {kernel}: {type(kernel)} not supported"
+        if config.cpp.onednn_graph:
+            assert isinstance(
+                kernel,
+                (
+                    torch._ops.OpOverload,
+                    torch._ops.HigherOrderOperator,
+                    torch._inductor.fx_passes.onednn_graph_fusion.OnednnGraphPartitionModule
+                ),
+            ), f"Fails to create FallbackKernel for {kernel}: {type(kernel)} not supported"
+        else:
+            assert isinstance(
+                kernel,
+                (
+                    torch._ops.OpOverload,
+                    torch._ops.HigherOrderOperator
+                    #torch._inductor.fx_passes.onednn_graph_fusion.OnednnGraphPartitionModule
+                ),
+            ), f"Fails to create FallbackKernel for {kernel}: {type(kernel)} not supported"
 
         if kernel.__module__ == "torch._ops.aten":
             op_base_name = (

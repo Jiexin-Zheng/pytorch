@@ -722,6 +722,44 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
         else:
             frozen_model_iter_fn = torch._dynamo.run(model_iter_fn)
 
+        expected_model = model
+
+        if args.llga_jit:
+            # # turn on llga fuser
+            torch.jit.enable_onednn_fusion(True)
+            # # turn on nnc fuser
+            # # torch._C._jit_set_texpr_fuser_enabled(True)
+
+            torch._C._jit_override_can_fuse_on_cpu(True)
+
+            if args.llga_jit_bf16:
+                # AMP for JIT mode is enabled by default, and is divergent with its eager mode counterpart
+                torch._C._jit_set_autocast_mode(False)
+                with torch.cpu.amp.autocast(cache_enabled=False, dtype=torch.bfloat16):
+                    # Conv-BatchNorm folding for CNN-based Vision Models should be done with ``torch.fx.experimental.optimization.fuse`` when AMP is used
+                    import torch.fx.experimental.optimization as optimization
+                    # Please note that optimization.fuse need not be called when AMP is not used
+                    jit_model = optimization.fuse(model)
+                    jit_model = torch.jit.trace(jit_model, example_inputs)
+                    jit_model = torch.jit.freeze(jit_model)
+                    jit_model(*example_inputs)
+                    jit_model(*example_inputs)
+                    jit_model(*example_inputs)
+                    jit_model(*example_inputs)
+                    jit_model(*example_inputs)
+            else:
+                jit_model = torch.jit.trace(model, example_inputs)
+                jit_model = torch.jit.freeze(jit_model)
+                jit_model(*example_inputs)
+                jit_model(*example_inputs)
+                jit_model(*example_inputs)
+                jit_model(*example_inputs)
+                jit_model(*example_inputs)
+
+            actual_model = jit_model
+        else:
+            actual_model = model
+
         for rep in trange(args.repeat, desc="running benchmark"):
             inputs = (
                 randomize_input(copy.deepcopy(example_inputs))
@@ -736,7 +774,7 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
             # interleave the runs to handle frequency scaling and load changes
             with maybe_mark_profile(p=p, mark="expected"):
                 timings[rep, 0], expected_output = timed(
-                    model,
+                    expected_model,
                     model_iter_fn,
                     inputs,
                     return_result=True,
@@ -747,9 +785,11 @@ def speedup_experiment(args, model_iter_fn, model, example_inputs, **kwargs):
             # call mark_step between the 2 calls to make the comparison fair.
             maybe_mark_step(args)
 
+            print("start running actual")
+
             with maybe_mark_profile(p=p, mark="actual"):
                 timings[rep, 1], actual_output = timed(
-                    model,
+                    actual_model,
                     frozen_model_iter_fn,
                     inputs,
                     return_result=True,
@@ -3165,6 +3205,18 @@ def parse_args(args=None):
         "--minify",
         action="store_true",
         help="Enable minification when failure is below tolerance. Save repro script for each model.",
+    )
+
+    parser.add_argument(
+        "--llga_jit_bf16",
+        action="store_true",
+        help="Enable bfloat16 datatype for llga case.",
+    )
+
+    parser.add_argument(
+        "--llga_jit",
+        action="store_true",
+        help="Enable bfloat16 datatype for llga case.",
     )
 
     group_fuser = parser.add_mutually_exclusive_group()

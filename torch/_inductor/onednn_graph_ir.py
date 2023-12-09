@@ -49,7 +49,7 @@ class OneDNNGraphFallbackKernel(ExternKernelAlloc):
             (
                 torch._ops.OpOverload,
                 torch._ops.HigherOrderOperator,
-                torch._inductor.fx_passes.onednn_graph_fusion.OnednnGraphPartitionModule
+                torch._inductor.fx_passes.ipex_onednn_graph_fusion.OnednnGraphPartitionModule
             ),
         ), f"Fails to create OneDNNGraphFallbackKernel for {kernel}: {type(kernel)} not supported"
 

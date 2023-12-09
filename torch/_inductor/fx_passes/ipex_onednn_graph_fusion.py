@@ -15,7 +15,14 @@ from torch.fx.passes.utils.fuser_utils import fuse_by_partitions
 from torch.fx.passes.utils.matcher_utils import InternalMatch
 from torch.utils._pytree import tree_flatten, tree_map
 from torch._inductor import config
-from torch._inductor.fx_passes.onednn_graph_fusion import OnednnGraphPartitionModule
+from torch._dynamo.utils import detect_fake_mode
+from torch.profiler import record_function
+from torch._inductor.lowering import lowerings as torch_lowerings
+from torch._inductor.lowering import register_lowering as torch_register_lowering
+from torch._inductor.lowering import fallbacks, add_needs_realized_inputs, add_layout_constraint
+from torch._inductor.decomposition import decompositions, get_decompositions
+from torch._inductor.ir import TensorBox
+from torch._inductor.onednn_graph_ir import OneDNNGraphFallbackKernel
 
 aten = torch.ops.aten
 prims = torch.ops.prims
@@ -356,6 +363,173 @@ def get_filtered_partitions(
 @lru_cache(maxsize=None)
 def allocate_empty_aten_from_desc(desc: llga.logical_tensor) -> torch.Tensor:
     return torch.empty_strided(desc.get_dims(), desc.get_strides())
+
+def fallback_handler(kernel, add_to_fallback_set=True):
+    if add_to_fallback_set:
+        fallbacks.add(kernel)
+
+    def handler(*args, **kwargs):
+        return tree_map(
+            TensorBox.create, OneDNNGraphFallbackKernel.create(kernel, *args, **kwargs)
+        )
+
+    return handler
+
+def OnednnGraph_make_fallback(op, layout_constraint=None, warn=True):
+    assert op not in decompositions, f"both a fallback and a decomp for same op: {op}"
+    if get_decompositions([op]) and warn and bool(os.getenv("CI")):
+        # Note: 'warn' is holdover from when this was a warning, but for ops that previously
+        # set warn=False we do not want a CI error.
+        # Ignore the 'suppress errors' configs in CI, as this particular warning happens on startup anyway and is not
+        # likely to be triggered preferentially on one CI config over another.
+        if torch._dynamo.config.suppress_errors:
+            torch._dynamo.config.suppress_errors = False
+            log.warning(
+                "A make_fallback error occurred in suppress_errors config,"
+                " and suppress_errors is being disabled to surface it."
+            )
+        raise AssertionError(
+            f"make_fallback({op}): a decomposition exists, we should switch to it."
+            " To fix this error, either add a decomposition to core_aten_decompositions (preferred)"
+            " or inductor_decompositions, and delete the corresponding `make_fallback` line."
+            " Get help from the inductor team if unsure, don't pick arbitrarily to unblock yourself.",
+        )
+
+    def register_fallback(op_overload):
+        add_needs_realized_inputs(op_overload)
+        if layout_constraint is not None:
+            add_layout_constraint(op_overload, layout_constraint)
+        return torch_register_lowering(op_overload, type_promotion_kind=None)(
+            fallback_handler(op_overload)
+        )
+
+    if isinstance(op, torch._ops.OpOverloadPacket):
+        for ol in op.overloads():
+            op_overload = getattr(op, ol)
+            register_fallback(op_overload)
+    elif isinstance(op, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
+        register_fallback(op)
+    elif isinstance(op, OnednnGraphPartitionModule):
+        register_fallback(op)
+    else:
+        raise RuntimeError(f"Unsupported fallback {op} with type {type(op)}")
+
+
+class OnednnGraphPartitionModule:
+    def __init__(
+        self,
+        onednn_graph: OnednnGraph,
+        partition: llga.partition,
+        input_order_data: List = None,
+        name="",
+    ):
+        super().__init__()
+        self.is_opaque = True
+        self.__name__ = name
+        self.partition = partition
+        self.onednn_graph = onednn_graph
+        self.input_order_data = [] if input_order_data is None else input_order_data
+        self.input_descs = partition.get_input_ports()
+        self.kernel = None
+        self.output_descs = None
+
+        # assume static shape
+        # cache the onednn graph tensors
+        self.input_onednn_tensors = []
+        self.output_onednn_tensors = []
+        # cache the output tensors to avoid reallocation
+        self.output_tensors = []
+        self.lock = threading.Lock()
+
+    def name(self):
+        return self.__name__
+
+    @record_function("OnednnGraphPartitionModule__call__")
+    def __call__(self, *args):
+        if self not in torch_lowerings:
+            OnednnGraph_make_fallback(self)
+            return torch_lowerings[self](*args)
+
+        # If val is an int, then it gives the index of args, otherwise it is a scalar tensor so we use as-is
+        input_tensors = [
+            args[val] if isinstance(val, int) else val for val in self.input_order_data
+        ]
+
+        # TODO: remove detect_fake_mode with an meta impl
+        fake_mode = detect_fake_mode(args)
+        if fake_mode:
+            input_descs = self.onednn_graph.update_input_descs(
+                self.input_descs, input_tensors
+            )
+            compiled_partition = self.onednn_graph.compile_partition(
+                self.partition, input_descs
+            )
+            output_descs = self.onednn_graph.get_compiled_output_descs(
+                compiled_partition, self.partition.get_output_ports()
+            )
+            output_tensors = [
+                torch.empty_strided(out_desc.get_dims(), out_desc.get_strides())
+                for out_desc in output_descs
+            ]
+            return output_tensors[0] if len(output_tensors) == 1 else output_tensors
+
+        with self.lock:
+            if not self.kernel:
+                cache_parameter = self.onednn_graph.is_inference
+                self.input_descs = self.onednn_graph.update_input_descs(
+                    self.input_descs, input_tensors, cache_parameter
+                )
+                self.kernel = self.onednn_graph.compile_partition(
+                    self.partition, self.input_descs
+                )
+                self.output_descs = self.onednn_graph.get_compiled_output_descs(
+                    self.kernel, self.partition.get_output_ports()
+                )
+
+        if not self.input_onednn_tensors:
+            self.input_onednn_tensors = [
+                llga.tensor(
+                    input_desc, self.onednn_graph.engine, input_tensor.data_ptr()
+                )
+                for input_desc, input_tensor in zip(self.input_descs, input_tensors)
+            ]
+        else:
+            for onednn_t, aten_t in zip(self.input_onednn_tensors, input_tensors):
+                onednn_t.from_aten(aten_t.data_ptr())
+
+        if not self.output_tensors:
+            self.output_tensors = [
+                allocate_empty_aten_from_desc(out_desc)
+                for out_desc in self.output_descs
+            ]
+
+        if not self.output_onednn_tensors:
+            self.output_onednn_tensors = [
+                llga.tensor(
+                    output_desc, self.onednn_graph.engine, self.output_tensor.data_ptr()
+                )
+                for output_desc, self.output_tensor in zip(
+                    self.output_descs, self.output_tensors
+                )
+            ]
+
+        assert not any(
+            isinstance(out, torch._subclasses.FakeTensor) for out in self.output_tensors
+        ), "unexpected faketensor in output_tensors"
+
+        with record_function(f"onednn_fuse_{self.__name__}"):
+            self.kernel.execute(
+                self.onednn_graph.stream,
+                self.input_onednn_tensors,
+                self.output_onednn_tensors,
+            )
+        # TODO: It seems like this fix and also the return statements of def call_function should be handled differently.
+        return (
+            self.output_tensors[0]
+            if len(self.output_tensors) == 1
+            else self.output_tensors
+        )
+
 
 
 def build_onednn_graph(gm: GraphModule) -> OnednnGraph:

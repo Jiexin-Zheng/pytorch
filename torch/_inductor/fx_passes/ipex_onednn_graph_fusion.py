@@ -497,6 +497,7 @@ def fuse_graph(gm: GraphModule, onednn_graph: OnednnGraph) -> GraphModule:
                 input_order_data=args_to_onednn_order,
                 name=current_partition_ext_name,
             )
+            setattr(node.target, "_inductor_lowering_function", True)
             log.info("Using oneDNN fusion: %s", current_partition_ext_name)
 
     gm.recompile()

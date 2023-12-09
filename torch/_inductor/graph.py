@@ -566,6 +566,9 @@ class GraphLowering(torch.fx.Interpreter):
         return tensor
 
     def call_function(self, target, args, kwargs):
+        if getattr(target, "is_opaque", False):
+            name = target.name()
+            self.opaque_ops[name] = target
         if target is operator.getitem and isinstance(args[0], (list, tuple, dict)):
             return super().call_function(target, args, kwargs)
 
@@ -574,9 +577,9 @@ class GraphLowering(torch.fx.Interpreter):
             return target(*args, **kwargs)
 
         if target not in lowerings:
-            '''assert isinstance(
+            assert isinstance(
                 target, torch._ops.OpOverload
-            ) or isinstance(target, torch._inductor.fx_passes.onednn_graph_fusion.OnednnGraphPartitionModule), f"{target} is not an OpOverload"'''
+            ), f"{target} is not an OpOverload"
             base_name = target.name().split(".")[0]
             if base_name in FALLBACK_ALLOW_LIST:
                 make_fallback(target)
@@ -591,9 +594,6 @@ class GraphLowering(torch.fx.Interpreter):
                     error.operator_str(target, args, kwargs),
                 )
                 make_fallback(target)
-                if getattr(target, "is_opaque", False):
-                    name = target.name()
-                    self.opaque_ops[name] = target
             elif get_decompositions([target]):
                 # There isn't a good way to dynamically patch this in
                 # since AOT Autograd already ran.  The error message tells

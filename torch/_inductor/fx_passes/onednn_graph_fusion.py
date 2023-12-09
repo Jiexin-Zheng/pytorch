@@ -2,6 +2,7 @@ import itertools
 import logging
 import numbers
 import threading
+import os
 from functools import lru_cache
 from math import prod
 from typing import Callable, Dict, List, Sequence
@@ -16,12 +17,17 @@ from torch.fx.passes.utils.fuser_utils import fuse_by_partitions
 from torch.fx.passes.utils.matcher_utils import InternalMatch
 from torch.profiler import record_function
 from torch.utils._pytree import tree_flatten, tree_map
+from torch._inductor.lowering import lowerings as torch_lowerings
+from torch._inductor.lowering import register_lowering as torch_register_lowering
+from torch._inductor.lowering import fallbacks, add_needs_realized_inputs, add_layout_constraint
+from torch._inductor.decomposition import decompositions, get_decompositions
+from torch._inductor.ir import TensorBox
+from torch._inductor.onednn_graph_ir import OneDNNGraphFallbackKernel
 
 aten = torch.ops.aten
 prims = torch.ops.prims
 
 log = logging.getLogger(__name__)
-
 
 class OnednnGraph:
     def __init__(self):
@@ -354,6 +360,56 @@ def get_filtered_partitions(
 def allocate_empty_aten_from_desc(desc: llga.logical_tensor) -> torch.Tensor:
     return torch.empty_strided(desc.get_dims(), desc.get_strides())
 
+def fallback_handler(kernel, add_to_fallback_set=True):
+    if add_to_fallback_set:
+        fallbacks.add(kernel)
+
+    def handler(*args, **kwargs):
+        return tree_map(
+            TensorBox.create, OneDNNGraphFallbackKernel.create(kernel, *args, **kwargs)
+        )
+
+    return handler
+
+def OnednnGraph_make_fallback(op, layout_constraint=None, warn=True):
+    assert op not in decompositions, f"both a fallback and a decomp for same op: {op}"
+    if get_decompositions([op]) and warn and bool(os.getenv("CI")):
+        # Note: 'warn' is holdover from when this was a warning, but for ops that previously
+        # set warn=False we do not want a CI error.
+        # Ignore the 'suppress errors' configs in CI, as this particular warning happens on startup anyway and is not
+        # likely to be triggered preferentially on one CI config over another.
+        if torch._dynamo.config.suppress_errors:
+            torch._dynamo.config.suppress_errors = False
+            log.warning(
+                "A make_fallback error occurred in suppress_errors config,"
+                " and suppress_errors is being disabled to surface it."
+            )
+        raise AssertionError(
+            f"make_fallback({op}): a decomposition exists, we should switch to it."
+            " To fix this error, either add a decomposition to core_aten_decompositions (preferred)"
+            " or inductor_decompositions, and delete the corresponding `make_fallback` line."
+            " Get help from the inductor team if unsure, don't pick arbitrarily to unblock yourself.",
+        )
+
+    def register_fallback(op_overload):
+        add_needs_realized_inputs(op_overload)
+        if layout_constraint is not None:
+            add_layout_constraint(op_overload, layout_constraint)
+        return torch_register_lowering(op_overload, type_promotion_kind=None)(
+            fallback_handler(op_overload)
+        )
+
+    if isinstance(op, torch._ops.OpOverloadPacket):
+        for ol in op.overloads():
+            op_overload = getattr(op, ol)
+            register_fallback(op_overload)
+    elif isinstance(op, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
+        register_fallback(op)
+    elif isinstance(op, torch._inductor.fx_passes.onednn_graph_fusion.OnednnGraphPartitionModule):
+        register_fallback(op)
+    else:
+        raise RuntimeError(f"Unsupported fallback {op} with type {type(op)}")
+
 
 class OnednnGraphPartitionModule:
     def __init__(
@@ -379,7 +435,6 @@ class OnednnGraphPartitionModule:
         self.output_onednn_tensors = []
         # cache the output tensors to avoid reallocation
         self.output_tensors = []
-
         self.lock = threading.Lock()
 
     def name(self):
@@ -387,6 +442,10 @@ class OnednnGraphPartitionModule:
 
     @record_function("OnednnGraphPartitionModule__call__")
     def __call__(self, *args):
+        if self not in torch_lowerings:
+            OnednnGraph_make_fallback(self)
+            return torch_lowerings[self](*args)
+
         # If val is an int, then it gives the index of args, otherwise it is a scalar tensor so we use as-is
         input_tensors = [
             args[val] if isinstance(val, int) else val for val in self.input_order_data

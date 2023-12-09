@@ -1694,10 +1694,8 @@ def make_fallback(op, layout_constraint=None, warn=True):
             register_fallback(op_overload)
     elif isinstance(op, (torch._ops.OpOverload, torch._ops.HigherOrderOperator)):
         register_fallback(op)
-    elif isinstance(op, torch._inductor.fx_passes.onednn_graph_fusion.OnednnGraphPartitionModule):
-        register_fallback(op)
-    '''else:
-        raise RuntimeError(f"Unsupported fallback {op} with type {type(op)}")'''
+    else:
+        raise RuntimeError(f"Unsupported fallback {op} with type {type(op)}")
 
 
 def philox_rand_offset(shape):

@@ -1,6 +1,6 @@
 import dataclasses
 import torch
-from torch._inductor.ir import ExternKernelAlloc, FixedLayout, MultiOutput, MultiOutputLayout, ExternKernelNode
+from torch._inductor.ir import ExternKernelAlloc, FixedLayout, MultiOutput, MultiOutputLayout, ExternKernelNode, Layout
 from typing import (
     Any,
     Sequence,
@@ -95,7 +95,7 @@ class OneDNNGraphFallbackKernel(ExternKernelAlloc):
                 raise NotImplementedError(
                     "Unable to find HigherOrderOperator kernel name"
                 )
-        elif getattr(kernel, "is_opaque", False):
+        elif isinstance(kernel, torch._inductor.fx_passes.ipex_onednn_graph_fusion.OnednnGraphPartitionModule):
             self.kernel = kernel
         else:
             if V.graph.cpp_wrapper:
@@ -304,7 +304,14 @@ class OneDNNGraphFallbackKernel(ExternKernelAlloc):
                 self.outputs,
             )
         else:
-            super().codegen(wrapper)
+            self.codegen_comment(wrapper)
+            args = [*self.codegen_args(), *self.codegen_kwargs()]
+            if isinstance(self.kernel, torch._inductor.fx_passes.ipex_onednn_graph_fusion.OnednnGraphPartitionModule):
+                V.graph.wrapper_code.generate_opaque_kernel_alloc(self.get_name(), self.kernel.name(), args)
+            else:
+                V.graph.wrapper_code.generate_extern_kernel_alloc(self, args)        
+            if isinstance(self.layout, Layout):
+                self.codegen_size_asserts(wrapper)
 
     @classmethod
     def create(cls, kernel, *args, **kwargs):

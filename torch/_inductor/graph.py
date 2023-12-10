@@ -218,7 +218,6 @@ class GraphLowering(torch.fx.Interpreter):
         )
         self._warned_fallback = {"aten.convolution_backward"}
         self.user_visible_outputs = user_visible_outputs
-        self.opaque_ops = {}
         self.cache_key: str = ""  # This is the cache key for the compiled artifact
         self.cache_path: str = ""  # This is the path in the filesystem where the compiled artifact is stored
         self.cache_linemap: List[
@@ -566,9 +565,6 @@ class GraphLowering(torch.fx.Interpreter):
         return tensor
 
     def call_function(self, target, args, kwargs):
-        if getattr(target, "is_opaque", False):
-            name = target.name()
-            self.opaque_ops[name] = target
         if target is operator.getitem and isinstance(args[0], (list, tuple, dict)):
             return super().call_function(target, args, kwargs)
 
@@ -948,8 +944,6 @@ class GraphLowering(torch.fx.Interpreter):
         assert mod.__file__ is not None
         #for name, value in self.constants.items():
         #    setattr(mod, name, value)
-        for name, value in self.opaque_ops.items():
-            setattr(mod, name, value)
         log.debug("Output code written to: %s", mod.__file__)
         output_code_log.debug("Output code: \n%s", code)
         output_code_log.info("Output code written to: %s", mod.__file__)

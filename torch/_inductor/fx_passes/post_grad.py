@@ -73,15 +73,15 @@ def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
     if config.cpp.onednn_graph:
         config.post_grad_custom_pre_pass = onednn_graph_fuse_fx
         config.post_grad_custom_post_pass = ipex_post_pass_for_onednn_graph
+        from ..codegen.onednn_graph_wrapper import OneDNNGraphWrapperCodeGen
+        from ..codegen.common import register_backend_for_device
+        from ..codegen.cpp import CppScheduling
+        register_backend_for_device("cpu", CppScheduling, OneDNNGraphWrapperCodeGen)
 
     if config.post_grad_custom_pre_pass is not None:
         config.post_grad_custom_pre_pass(gm.graph)
 
     if config.pattern_matcher:
-        if torch.backends.mkldnn.is_available() and config.cpp.onednn_graph:
-            from .onednn_graph_fusion import onednn_graph_fuse_fx
-
-            onednn_graph_fuse_fx(gm, is_inference)
         lazy_init()
         group_batch_fusion_post_grad_passes(gm.graph)
         remove_noop_ops(gm.graph)
@@ -114,9 +114,8 @@ def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
 
 @init_once_fakemode
 def lazy_init():
-    if torch.backends.mkldnn.is_available() and not config.cpp.onednn_graph:
+    if torch._C._has_mkldnn:
         from .mkldnn_fusion import _mkldnn_fusion_init
-
         _mkldnn_fusion_init()
 
 

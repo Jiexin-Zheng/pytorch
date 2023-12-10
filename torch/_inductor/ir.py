@@ -3737,10 +3737,7 @@ class ExternKernelAlloc(ExternKernel):
     def codegen(self, wrapper):
         self.codegen_comment(wrapper)
         args = [*self.codegen_args(), *self.codegen_kwargs()]
-        if getattr(self.kernel, "is_opaque", False):
-            V.graph.wrapper_code.generate_opaque_kernel_alloc(self.get_name(), self.kernel.name(), args)
-        else:
-            V.graph.wrapper_code.generate_extern_kernel_alloc(self, args)        
+        V.graph.wrapper_code.generate_extern_kernel_alloc(self, args)
         if isinstance(self.layout, Layout):
             self.codegen_size_asserts(wrapper)
 
@@ -4152,8 +4149,6 @@ class FallbackKernel(ExternKernelAlloc):
                 raise NotImplementedError(
                     "Unable to find HigherOrderOperator kernel name"
                 )
-        elif getattr(kernel, "is_opaque", False):
-            self.kernel = kernel
         else:
             if V.graph.cpp_wrapper:
                 self.use_cpp_op_schema = True

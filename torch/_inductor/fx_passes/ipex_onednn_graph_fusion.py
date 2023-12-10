@@ -26,7 +26,7 @@ from torch._inductor.onednn_graph_ir import OneDNNGraphFallbackKernel
 
 aten = torch.ops.aten
 prims = torch.ops.prims
-
+global_opaque_ops = {}
 log = logging.getLogger(__name__)
 
 
@@ -671,12 +671,12 @@ def fuse_graph(gm: GraphModule, onednn_graph: OnednnGraph) -> GraphModule:
                 input_order_data=args_to_onednn_order,
                 name=current_partition_ext_name,
             )
+            global_opaque_ops[current_partition_ext_name]=node.target
             setattr(node.target, "_inductor_lowering_function", True)
             log.info("Using oneDNN fusion: %s", current_partition_ext_name)
 
     gm.recompile()
     return gm
-
 
 def replace_pattern_with_replacement(
     gm: GraphModule,

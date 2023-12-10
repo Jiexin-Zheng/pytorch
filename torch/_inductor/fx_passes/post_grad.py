@@ -69,15 +69,6 @@ def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
 
     fake_tensor_updater = FakeTensorUpdater(gm.graph)
 
-    from .ipex_onednn_graph_fusion import onednn_graph_fuse_fx, ipex_post_pass_for_onednn_graph
-    if config.cpp.onednn_graph:
-        config.post_grad_custom_pre_pass = onednn_graph_fuse_fx
-        config.post_grad_custom_post_pass = ipex_post_pass_for_onednn_graph
-        from ..codegen.onednn_graph_wrapper import OneDNNGraphWrapperCodeGen
-        from ..codegen.common import register_backend_for_device
-        from ..codegen.cpp import CppScheduling
-        register_backend_for_device("cpu", CppScheduling, OneDNNGraphWrapperCodeGen)
-
     if config.post_grad_custom_pre_pass is not None:
         config.post_grad_custom_pre_pass(gm.graph)
 

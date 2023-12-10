@@ -298,13 +298,8 @@ def onednn_graph_fuse_fx(gm_graph: Graph, is_inference: bool=True):
     log.info("Finished compiling graph with oneDNN backend")
     log.debug("====== Fx Graph after oneDNN compile ======")
     log.debug(gm.print_readable(print_output=False))
-    config.cpp.onednn_graph = False
-    print("turn off onednn graph temporarily")
     return gm
 
-def ipex_post_pass_for_onednn_graph(gm_graph: Graph):
-    config.cpp.onednn_graph = True
-    print("turn on onednn graph back")
 
 onednn_graph_intensive_ops = [
     aten.addmm.default,

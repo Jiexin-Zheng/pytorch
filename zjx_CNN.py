@@ -1,4 +1,11 @@
 import torch
+from torch._inductor import config
+from torch._inductor.fx_passes.ipex_onednn_graph_fusion import onednn_graph_fuse_fx
+config.post_grad_custom_pre_pass = onednn_graph_fuse_fx
+from torch._inductor.codegen.onednn_graph_wrapper import OneDNNGraphWrapperCodeGen
+from torch._inductor.codegen.common import register_backend_for_device
+from torch._inductor.codegen.cpp import CppScheduling
+register_backend_for_device("cpu", CppScheduling, OneDNNGraphWrapperCodeGen)
 
 class CNN(torch.nn.Module):
     def __init__(self):

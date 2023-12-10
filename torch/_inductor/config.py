@@ -386,10 +386,6 @@ class cpp:
     # using atomic_add.
     fallback_scatter_reduce_sum = True
 
-    # Use oneDNN Graph fusions for compute intensive ops
-    onednn_graph = os.environ.get("TORCHINDUCTOR_ONEDNN_GRAPH", "0") == "1"
-
-
 # config specific to codegen/triton.py
 class triton:
     # Use cudagraphs on output code

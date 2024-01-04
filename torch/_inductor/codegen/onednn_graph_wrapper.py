@@ -17,7 +17,6 @@ class OneDNNGraphWrapperCodeGen(WrapperCodeGen):
                 from math import inf, nan
                 from torch._inductor.hooks import run_intermediate_hooks
                 from torch._inductor.utils import maybe_profile
-                from torch._inductor.codegen.memory_planning import _align as align
 
                 from torch import device, empty, empty_strided
                 from {codecache.__name__} import AsyncCompile
@@ -27,9 +26,7 @@ class OneDNNGraphWrapperCodeGen(WrapperCodeGen):
                 for name, value in global_opaque_ops.items():
                    global_dict[name] = value
                 aten = torch.ops.aten
-                inductor_ops = torch.ops.inductor
                 assert_size_stride = torch._C._dynamo.guards.assert_size_stride
-                alloc_from_pool = torch.ops.inductor._alloc_from_pool
                 reinterpret_tensor = torch.ops.inductor._reinterpret_tensor
                 async_compile = AsyncCompile()
 

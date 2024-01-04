@@ -45,6 +45,9 @@ epilogue_fusion_first = False
 # enable pattern match+replace optimizations
 pattern_matcher = True
 
+post_grad_custom_pre_pass = None
+post_grad_custom_post_pass = None
+
 # Optimize away split cat patterns (Experimental)
 split_cat_fx_passes = True
 

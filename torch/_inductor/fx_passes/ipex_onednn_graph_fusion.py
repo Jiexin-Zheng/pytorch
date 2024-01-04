@@ -23,6 +23,7 @@ from torch._inductor.lowering import fallbacks, add_needs_realized_inputs, add_l
 from torch._inductor.decomposition import decompositions, get_decompositions
 from torch._inductor.ir import TensorBox
 from torch._inductor.onednn_graph_ir import OneDNNGraphFallbackKernel
+from torch._inductor.onednn_graph_ir import OneDNNGraphKernel
 
 aten = torch.ops.aten
 prims = torch.ops.prims
@@ -367,6 +368,9 @@ def fallback_handler(kernel, add_to_fallback_set=True):
         return tree_map(
             TensorBox.create, OneDNNGraphFallbackKernel.create(kernel, *args, **kwargs)
         )
+        # return tree_map(
+        #     TensorBox.create, OneDNNGraphKernel.create(kernel, *args, **kwargs)
+        # )
 
     return handler
 

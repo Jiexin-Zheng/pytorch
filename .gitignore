@@ -368,3 +368,5 @@ sweep/
 # Android build artifacts
 android/pytorch_android/.cxx
 android/pytorch_android_torchvision/.cxx
+
+benchmark_logs_jiexin/

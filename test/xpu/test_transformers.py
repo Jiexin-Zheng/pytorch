@@ -365,6 +365,99 @@ class TestSDPAXpuOnly(NNTestCase):
             with sdpa_kernel(backends=[SDPBackend.EFFICIENT_ATTENTION, SDPBackend.MATH]):
                 assert torch._fused_sdp_choice(query, key, value) == SDPBackend.OVERRIDEABLE.value
 
+    @parametrize("fused_kernel", [SDPBackend.EFFICIENT_ATTENTION])
+    @parametrize("dtype", [torch.half])
+    @parametrize("batch_size", [224])
+    @parametrize("q_seq_len", [197])
+    @parametrize("kv_seq_len", [197])
+    @parametrize("n_head", [12])
+    @parametrize("head_dim", [64])
+    @parametrize("bool_mask", [False])
+    @parametrize("train", [False])
+    def test_scaled_dot_product_fused_attention_mask_vs_math(
+        self,
+        device,
+        fused_kernel,
+        dtype,
+        batch_size,
+        q_seq_len,
+        kv_seq_len,
+        n_head,
+        head_dim,
+        bool_mask,
+        train,
+    ):
+        tol = Tolerances(1e-5, 5e-6)
+        if dtype is torch.bfloat16:
+            tol = Tolerances(5e-2, 5e-2)
+        if dtype is torch.float16:
+            tol = Tolerances(1e-2, 1e-2)
+        mask_shape = [batch_size, 1, 1, kv_seq_len]
+        make_tensor = partial(rand_sdpa_tensor, type="dense", device=device, dtype=dtype, requires_grad=False)
+        q_shape = SdpaShape(batch_size, n_head, q_seq_len, head_dim)
+        kv_shape = SdpaShape(batch_size, n_head, kv_seq_len, head_dim)
+        q = make_tensor(q_shape)
+        k = make_tensor(kv_shape)
+        v = make_tensor(kv_shape)
+        q2, k2, v2 = q.clone(), k.clone(), v.clone()
+
+        if train:
+            q.requires_grad_(True)
+            k.requires_grad_(True)
+            v.requires_grad_(True)
+            q2.requires_grad_(True)
+            k2.requires_grad_(True)
+            v2.requires_grad_(True)
+
+        if dtype in [torch.bfloat16, torch.float16]:
+            q2, k2, v2 = q2.float(), k2.float(), v2.float()
+        # (B, nh, T, hs)
+        q = q.view(batch_size, q_seq_len, n_head, head_dim).transpose(1, 2)
+        k = k.view(batch_size, kv_seq_len, n_head, head_dim).transpose(1, 2)
+        v = v.view(batch_size, kv_seq_len, n_head, head_dim).transpose(1, 2)
+        # if bool_mask:
+        #     attn_mask = torch.randint(0, 2, size=mask_shape, dtype=torch.bool, device=device)
+        # else:
+        # attn_mask = torch.randn(mask_shape, dtype=dtype, device=device)
+        attn_mask = None
+
+        q2 = q2.view(batch_size, q_seq_len, n_head, head_dim).transpose(1, 2)
+        k2 = k2.view(batch_size, kv_seq_len, n_head, head_dim).transpose(1, 2)
+        v2 = v2.view(batch_size, kv_seq_len, n_head, head_dim).transpose(1, 2)
+
+        with sdpa_kernel(backends=[fused_kernel]):
+            actual = torch.nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+        with sdpa_kernel(backends=[SDPBackend.MATH]):
+            # if not bool_mask and dtype in [torch.bfloat16, torch.float16]:
+            #     attn_mask = attn_mask.float()
+            math_ref = torch.nn.functional.scaled_dot_product_attention(
+                q2, k2, v2, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+
+        if dtype in [torch.bfloat16, torch.float16]:
+            math_ref = math_ref.to(dtype)
+
+        # # print("actual", actual)
+        # # print("math_ref", math_ref)
+
+        self.assertEqual(actual, math_ref, atol=tol.atol, rtol=tol.rtol)
+
+        iter_n = 20
+        # with torch.profiler.profile(
+        #         activities=[
+        #             torch.profiler.ProfilerActivity.CPU],
+        #         schedule=torch.profiler.schedule(
+        #             wait=2,
+        #             warmup=iter_n,
+        #             active=20),
+        #         on_trace_ready=self.trace_handler
+        #         ) as prof:
+        #     for _ in range(iter_n + 22):
+        #         # with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+        #         actual = torch.nn.functional.scaled_dot_product_attention(
+        #             q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+        #         prof.step()
+
 
 instantiate_device_type_tests(
     TestSDPAXpuOnly, globals(), only_for="xpu", allow_xpu=True

@@ -324,7 +324,8 @@ class TestSDPAXpuOnly(NNTestCase):
     def test_fused_sdp_choice(self, device, type: str):
         batch_size, seq_len, num_heads, head_dim = 2, 128, 8, 64
         shape = SdpaShape(batch_size, num_heads, seq_len, head_dim)
-        make_tensor = partial(rand_sdpa_tensor, device=device, dtype=torch.float16, packed=True, requires_grad=False) # set requires_grad to False for onednn graph
+        make_tensor = partial(rand_sdpa_tensor, device=device, dtype=torch.float16, packed=True,
+                              requires_grad=False)  # set requires_grad to False for onednn graph
 
         qkv = make_tensor(shape, type=type)
         query, key, value = qkv.chunk(3, dim=-1)
@@ -392,7 +393,7 @@ class TestSDPAXpuOnly(NNTestCase):
             tol = Tolerances(5e-2, 5e-2)
         if dtype is torch.float16:
             tol = Tolerances(1e-2, 1e-2)
-        mask_shape = [batch_size, 1, 1, kv_seq_len]
+        mask_shape = [batch_size, n_head, q_seq_len, kv_seq_len]
         make_tensor = partial(rand_sdpa_tensor, type="dense", device=device, dtype=dtype, requires_grad=False)
         q_shape = SdpaShape(batch_size, n_head, q_seq_len, head_dim)
         kv_shape = SdpaShape(batch_size, n_head, kv_seq_len, head_dim)
@@ -418,8 +419,9 @@ class TestSDPAXpuOnly(NNTestCase):
         # if bool_mask:
         #     attn_mask = torch.randint(0, 2, size=mask_shape, dtype=torch.bool, device=device)
         # else:
-        # attn_mask = torch.randn(mask_shape, dtype=dtype, device=device)
-        attn_mask = None
+        attn_mask = make_tensor(SdpaShape(*mask_shape))
+        attn_mask = attn_mask.view(batch_size, n_head, q_seq_len, kv_seq_len)
+        # attn_mask = None
 
         q2 = q2.view(batch_size, q_seq_len, n_head, head_dim).transpose(1, 2)
         k2 = k2.view(batch_size, kv_seq_len, n_head, head_dim).transpose(1, 2)
@@ -443,20 +445,36 @@ class TestSDPAXpuOnly(NNTestCase):
         self.assertEqual(actual, math_ref, atol=tol.atol, rtol=tol.rtol)
 
         iter_n = 20
-        # with torch.profiler.profile(
-        #         activities=[
-        #             torch.profiler.ProfilerActivity.CPU],
-        #         schedule=torch.profiler.schedule(
-        #             wait=2,
-        #             warmup=iter_n,
-        #             active=20),
-        #         on_trace_ready=self.trace_handler
-        #         ) as prof:
-        #     for _ in range(iter_n + 22):
-        #         # with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
-        #         actual = torch.nn.functional.scaled_dot_product_attention(
-        #             q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
-        #         prof.step()
+        with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.XPU],
+                schedule=torch.profiler.schedule(
+                    wait=2,
+                    warmup=iter_n,
+                    active=20),
+                on_trace_ready=type(self).trace_handler) as prof:
+            for _ in range(iter_n + 22):
+                # with sdpa_kernel(backends=[SDPBackend.FLASH_ATTENTION]):
+                actual = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, attn_mask=attn_mask, dropout_p=0.0, is_causal=False)
+                torch.xpu.synchronize()
+                prof.step()
+
+    @staticmethod
+    def trace_handler(p):
+        import inspect
+        print(p.key_averages().table(sort_by="self_xpu_time_total"))
+        cur_frame = inspect.currentframe()
+        cal_frame = inspect.getouterframes(cur_frame, 2)
+        test_name = ""
+        for f in cal_frame:
+            if f[3].startswith("test_"):
+                test_name = f[3]
+                break
+
+        from datetime import datetime
+        now = datetime.now().strftime('%Y%m%d_%H%M%S')
+        p.export_chrome_trace(f"trace_{test_name}_{p.step_num}_{now}.json")
 
 
 instantiate_device_type_tests(

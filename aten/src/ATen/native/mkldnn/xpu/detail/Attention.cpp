@@ -57,9 +57,6 @@ struct SDPALogicalParams {
           dtype,
           attn_mask_->sizes().vec(),
           attn_mask_->strides().vec()};
-      printf("attn_mask %ld %ld %ld %ld\n", attn_mask_->sizes()[0], attn_mask_->sizes()[1], attn_mask_->sizes()[2], attn_mask_->sizes()[3]);
-      printf("attn_mask %ld %ld %ld %ld\n", attn_mask_->strides()[0], attn_mask_->strides()[1], attn_mask_->strides()[2], attn_mask_->strides()[3]);
-      fflush(stdout);
     }
     value = {
         static_cast<size_t>(TensorID::value),
@@ -73,7 +70,11 @@ struct SDPALogicalParams {
         output_.strides().vec()};
   }
   std::vector<logical_tensor> get_input() const {
-    return {query, key, scale, value};
+    if (attn_mask.has_value()) {
+      return {query, key, scale, attn_mask.value(), value};
+    } else {
+      return {query, key, scale, value};
+    }
   }
   std::vector<logical_tensor> get_output() const {
     return {output};

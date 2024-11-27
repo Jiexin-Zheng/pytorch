@@ -86,7 +86,10 @@ partition create_sdpa_graph_partition(
     int seq_len_q,
     int seq_len_k,
     int num_head,
+    int num_head_kv,
     int head_dim,
+    int head_dim_v,
+    bool enable_gqa,
     bool is_causal,
     data_type dtype,
     const SDPALogicalParams& params) {
@@ -98,11 +101,30 @@ partition create_sdpa_graph_partition(
   size_t lt_id = static_cast<size_t>(SDPALogicalParams::TensorID::end);
   size_t op_id = 0;
 
+  std::optional<op> query_reshape;
+  std::optional<op> key_reshape;
+  std::optional<logical_tensor> query_reshape_lt;
+  std::optional<logical_tensor> key_reshape_lt;
+  std::optional<dims> q_sz_reshape;
+  std::optional<dims> kv_sz_reshape;
+  if(enable_gqa){
+    q_sz_reshape = {batch_size, num_head_kv, num_head / num_head_kv, seq_len_q, head_dim};
+    kv_sz_reshape = {batch_size, num_head_kv, 1, seq_len_k, head_dim};
+    query_reshape_lt = {lt_id++, dtype, q_sz_reshape.value(), layout_type::strided};
+    key_reshape_lt = {lt_id++, dtype, kv_sz_reshape.value(), layout_type::strided};
+    query_reshape = {op_id++, op::kind::StaticReshape,{params.query},{query_reshape_lt.value()},"reshape1"};
+    query_reshape->set_attr(op::attr::shape, q_sz_reshape.value());
+    query_reshape->set_attr(op::attr::special_zero, false);
+    key_reshape = {op_id++, op::kind::StaticReshape,{params.key},{key_reshape_lt.value()},"reshape2"};
+    key_reshape->set_attr(op::attr::shape, kv_sz_reshape.value());
+    key_reshape->set_attr(op::attr::special_zero, false);
+  }
+
   logical_tensor matmul_qk_out{lt_id++, dtype};
   op matmul_qk{
       op_id++,
       op::kind::MatMul,
-      {params.query, params.key},
+      {query_reshape_lt.value_or(params.query), key_reshape_lt.value_or(params.key)},
       {matmul_qk_out},
       "matmul_qk"};
   matmul_qk.set_attr<bool>(op::attr::transpose_b, true);
@@ -116,13 +138,24 @@ partition create_sdpa_graph_partition(
       "scale_div"};
 
   std::optional<op> mask_add;
+  std::optional<op> mask_reshape;
   std::optional<logical_tensor> masked_qk_out;
+  std::optional<dims> mask_sz_reshape;
+  std::optional<logical_tensor> mask_reshape_lt;
   if (params.attn_mask.has_value()) {
     masked_qk_out = {lt_id++, dtype};
+    if(enable_gqa){
+      mask_sz_reshape = {batch_size, 1, 1, 1, seq_len_k};
+      mask_reshape_lt = {lt_id++, dtype, mask_sz_reshape.value(), layout_type::strided};
+      mask_reshape = {op_id++, op::kind::StaticReshape,{params.attn_mask.value()},{mask_reshape_lt.value()},"reshape3"};
+      mask_reshape->set_attr(op::attr::shape, mask_sz_reshape.value());
+      mask_reshape->set_attr(op::attr::special_zero, false);
+    }
+    
     mask_add = {
         op_id++,
         op::kind::Add,
-        {scaled_qk_out, params.attn_mask.value()},
+        {scaled_qk_out, mask_reshape_lt.value_or(params.attn_mask.value())},
         {masked_qk_out.value()},
         "mask_add"};
   } else if (is_causal) {
@@ -136,22 +169,61 @@ partition create_sdpa_graph_partition(
   softmax.add_input(masked_qk_out.value_or(scaled_qk_out));
   softmax.add_output(softmax_out);
 
+
+  std::optional<op> value_reshape;;
+  std::optional<logical_tensor> value_reshape_lt;
+  if(enable_gqa){
+    value_reshape_lt = {lt_id++, dtype, kv_sz_reshape.value(), layout_type::strided};
+    value_reshape = {op_id++, op::kind::StaticReshape,{params.value},{value_reshape_lt.value()},"reshape4"};
+    value_reshape->set_attr(op::attr::shape, kv_sz_reshape.value());
+    value_reshape->set_attr(op::attr::special_zero, false);
+  }
+
+  std::optional<logical_tensor> output_reshape_lt;
+  if(enable_gqa){
+    q_sz_reshape = {batch_size, num_head_kv, num_head / num_head_kv, seq_len_q, head_dim_v};
+    output_reshape_lt = {lt_id++, dtype, q_sz_reshape.value(), layout_type::strided};
+  }
+
   op matmul_v{
       op_id++,
       op::kind::MatMul,
-      {softmax_out, params.value},
-      {params.output},
+      {softmax_out, value_reshape_lt.value_or(params.value)},
+      {output_reshape_lt.value_or(params.output)},
       "matmul_v"};
+
+  std::optional<op> output_reshape;
+  std::optional<dims> q_sz;
+  if(enable_gqa){
+    q_sz = {batch_size, num_head, seq_len_q, head_dim_v};
+    output_reshape = {op_id++, op::kind::StaticReshape,{output_reshape_lt.value()},{params.output},"reshape5"};
+    output_reshape->set_attr(op::attr::shape, q_sz.value());
+    output_reshape->set_attr(op::attr::special_zero, false);
+  }
+
 
   engine::kind ekind = engine::kind::gpu;
   graph g(ekind);
+  if(enable_gqa){
+    g.add_op(query_reshape.value());
+    g.add_op(key_reshape.value());
+  }
   g.add_op(matmul_qk);
   g.add_op(scale_div);
   if (mask_add.has_value()) {
+    if(enable_gqa){
+      g.add_op(mask_reshape.value());
+    }
     g.add_op(mask_add.value());
   }
   g.add_op(softmax);
+  if(enable_gqa){
+    g.add_op(value_reshape.value());
+  }
   g.add_op(matmul_v);
+  if(enable_gqa){
+    g.add_op(output_reshape.value());
+  }
   g.finalize();
   auto partitions = g.get_partitions();
   TORCH_CHECK(
@@ -174,6 +246,7 @@ TORCH_API void gpu_float_sdpa(
     const Tensor& key,
     const Tensor& value,
     const std::optional<at::Tensor>& attn_mask,
+    bool enable_gqa,
     bool is_causal,
     float softmax_scale,
     const Tensor& output) {
@@ -244,33 +317,67 @@ TORCH_API void gpu_float_sdpa(
   if (!cp_entry_ref.has_value()) {
     SDPALogicalParams logical_params(
         query, key, value, attn_mask, output, logical_tensor_dtype);
-
     auto partition_ = cache.find_partition(patternID);
-    if (!partition_.has_value()) {
-      // partition cache no hit
-      // graph building and partitioning
-      partition sdp_partition = create_sdpa_graph_partition(
-          batch_size,
-          seq_len_q,
-          seq_len_k,
-          num_head,
-          head_dim,
-          is_causal,
-          logical_tensor_dtype,
-          logical_params);
-      partition_ = cache.insert_partition_cache(patternID, sdp_partition);
-    }
-    cp_entry sdp_cp_entry{
+    // partition cache should be disabled for GQA as it contains static reshape ops
+    if(!enable_gqa){
+      if (!partition_.has_value()) {
+        // partition cache no hit
+        // graph building and partitioning
+        partition sdp_partition = create_sdpa_graph_partition(
+            batch_size,
+            seq_len_q,
+            seq_len_k,
+            num_head,
+            num_head_kv,
+            head_dim,
+            head_dim_v,
+            enable_gqa,
+            is_causal,
+            logical_tensor_dtype,
+            logical_params);
+        partition_ = cache.insert_partition_cache(patternID, sdp_partition);
+      }
+      cp_entry sdp_cp_entry{
         .partition_ = partition_->get(),
         .input_logical_tensors = logical_params.get_input(),
         .output_logical_tensors = logical_params.get_output(),
-    };
+      };
+
     // partition compilation
     sdp_cp_entry.cp = sdp_cp_entry.partition_.compile(
         sdp_cp_entry.input_logical_tensors,
         sdp_cp_entry.output_logical_tensors,
         eng);
+
     cp_entry_ref = cache.insert_fused_kernel_cache(map_key, sdp_cp_entry);
+    }else{
+        partition sdp_partition = create_sdpa_graph_partition(
+            batch_size,
+            seq_len_q,
+            seq_len_k,
+            num_head,
+            num_head_kv,
+            head_dim,
+            head_dim_v,
+            enable_gqa,
+            is_causal,
+            logical_tensor_dtype,
+            logical_params);
+       // partition_ = std::move(std::ref(sdp_partition));
+        cp_entry sdp_cp_entry{
+        .partition_ = sdp_partition,
+        .input_logical_tensors = logical_params.get_input(),
+        .output_logical_tensors = logical_params.get_output(),
+      };
+
+          // partition compilation
+    sdp_cp_entry.cp = sdp_cp_entry.partition_.compile(
+        sdp_cp_entry.input_logical_tensors,
+        sdp_cp_entry.output_logical_tensors,
+        eng);
+        
+    cp_entry_ref = cache.insert_fused_kernel_cache(map_key, sdp_cp_entry);
+    }
   }
 
   // partition execution

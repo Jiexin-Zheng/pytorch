@@ -192,6 +192,10 @@ _scaled_dot_product_fused_attention_overrideable_xpu(
   const int64_t head_dim_v = value.size(3);
   const int64_t seq_len_q = query.size(2);
   const int64_t seq_len_kv = key.size(2);
+  bool enable_gqa = false;
+  if(num_head != num_head_kv) {
+    enable_gqa = true;
+  }
 
   auto opts = query.options();
   auto output = at::empty({batch_size, num_head, seq_len_q, head_dim}, opts);
@@ -224,6 +228,7 @@ _scaled_dot_product_fused_attention_overrideable_xpu(
       key,
       value,
       attn_mask_fallback,
+      enable_gqa,
       false, // is_causal fallback with attn_mask for now
       scale.has_value() ? scale.value() : (1.0 / std::sqrt(head_dim)),
       output);
